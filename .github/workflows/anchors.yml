@@ -1,0 +1,61 @@
+name: Ancres du journal d'audit
+
+on:
+  schedule:
+    # Toutes les heures, 7 minutes après le relevé fait par la base (à l'heure pile)
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: anchors
+  cancel-in-progress: false
+
+jobs:
+  anchors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installer le client OpenTimestamps
+        run: pip install opentimestamps-client
+
+      - name: Recopier les nouvelles ancres
+        id: fetch
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          node scripts/fetch-anchors.mjs > new-files.txt
+          echo "count=$(grep -c . new-files.txt || true)" >> "$GITHUB_OUTPUT"
+
+      - name: Horodater les nouvelles ancres (OpenTimestamps)
+        if: steps.fetch.outputs.count != '0'
+        run: xargs -r -a new-files.txt ots stamp
+
+      - name: Compléter les preuves en attente (ancrage Bitcoin)
+        run: |
+          find anchors -name '*.ots' -print0 | xargs -0 -r -n 1 ots upgrade || true
+
+      - name: Enregistrer
+        run: |
+          rm -f new-files.txt
+          git config user.name "safevote-anchors[bot]"
+          git config user.email "safevote-anchors@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Rien de nouveau."
+          else
+            git commit -m "Ancres du $(date -u +'%Y-%m-%d %H:%M') UTC"
+            git push
+          fi
